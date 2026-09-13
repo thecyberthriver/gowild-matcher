@@ -1,11 +1,13 @@
-name: GoWild matcher responder
+name: GoWild matcher responder (poller — DISABLED)
 
-# Answers on-demand /search commands. Runs every ~5 min in the cloud so the bot
-# replies whether or not your PC is on. (Public repo = free unlimited minutes.)
-# Note: GitHub cron isn't real-time — expect up to a few minutes' latency.
+# DISABLED while the instant Cloudflare webhook is active. A Telegram bot cannot
+# use a webhook and getUpdates polling at the same time (getUpdates returns 409
+# once a webhook is set), so the 5-min cron below is commented out. This poller
+# stays as a fallback: run `cloudflare-webhook/set_webhook.py --delete` to remove
+# the webhook, then re-enable the schedule here.
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:

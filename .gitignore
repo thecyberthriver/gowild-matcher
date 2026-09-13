@@ -4,3 +4,6 @@ poll_offset.json
 *.log
 __pycache__/
 *.pyc
+node_modules/
+.wrangler/
+cloudflare-webhook/.dev.vars

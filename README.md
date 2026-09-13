@@ -70,10 +70,12 @@ Beyond the morning digest, you can **text the bot any time**:
 - `/search` — uses your default hub.
 - `/help` — usage.
 
-A second workflow (`responder.yml`) polls Telegram every ~5 min in the cloud, so
-the bot answers **whether or not your PC is on**. GitHub cron isn't real-time, so
-expect up to a few minutes' latency (upgrade path: a webhook host for instant
-replies). Poll offset is persisted via `actions/cache`.
+**Instant replies** are served by a Cloudflare Worker webhook (~1 second) — see
+the full step-by-step, video-ready guide in
+[`docs/instant-webhook-walkthrough.md`](docs/instant-webhook-walkthrough.md) and
+the Worker itself in [`cloudflare-webhook/`](cloudflare-webhook/). The older
+`responder.yml` poller (answers within a few minutes via GitHub Actions) is kept
+as a documented fallback; a bot can use a webhook **or** polling, not both.
 
 ## Android / opening in the app
 

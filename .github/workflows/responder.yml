@@ -1,21 +1,22 @@
-name: GoWild matcher daily
+name: GoWild matcher responder
 
-# Runs in GitHub's cloud so it fires whether or not your PC is on.
+# Answers on-demand /search commands. Runs every ~5 min in the cloud so the bot
+# replies whether or not your PC is on. (Public repo = free unlimited minutes.)
+# Note: GitHub cron isn't real-time — expect up to a few minutes' latency.
 on:
   schedule:
-    # 13:00 UTC daily = 9 AM ET (EDT) / 8 AM ET (EST). No timezone in cron.
-    - cron: "0 13 * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 concurrency:
-  group: gowild-matcher
+  group: gowild-matcher-responder
   cancel-in-progress: false
 
 jobs:
-  match:
+  respond:
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -25,19 +26,18 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
 
-      - name: Restore de-dupe cache
+      - name: Restore poll offset
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
-          path: seen.json
-          key: gowild-matcher-seen-${{ github.run_id }}
+          path: poll_offset.json
+          key: gowild-matcher-offset-${{ github.run_id }}
           restore-keys: |
-            gowild-matcher-seen-
+            gowild-matcher-offset-
 
-      - name: Send GoWild matches
+      - name: Answer /search commands
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MY_ORIGINS: ${{ vars.MY_ORIGINS }}
           LINK_MODE: ${{ vars.LINK_MODE }}
-        run: python gowild_matcher.py
+        run: python gowild_matcher.py --serve-once

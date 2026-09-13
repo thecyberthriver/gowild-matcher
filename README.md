@@ -57,8 +57,39 @@ message. Blackout dates (Peak Day Charge) are flagged with ⚠️. De-dupes on
 python gowild_matcher.py --preview        # console dry run, no Telegram, no state change
 python gowild_matcher.py --origin LAS     # searchgwp-style: every city from ONE airport, printed
 python gowild_matcher.py --chatid         # discover your Telegram chat id
-python gowild_matcher.py                   # real run — send matches to Telegram
+python gowild_matcher.py --serve-once     # one poll cycle: answer pending /search commands
+python gowild_matcher.py                   # real run — send the daily digest to Telegram
 ```
+
+## On-demand `/search` (chat with the bot)
+
+Beyond the morning digest, you can **text the bot any time**:
+
+- `/search LAS` — one-tap GoWild links from Las Vegas to every city bookable now
+  (tomorrow domestic + 10-day international). Any Frontier airport code works.
+- `/search` — uses your default hub.
+- `/help` — usage.
+
+A second workflow (`responder.yml`) polls Telegram every ~5 min in the cloud, so
+the bot answers **whether or not your PC is on**. GitHub cron isn't real-time, so
+expect up to a few minutes' latency (upgrade path: a webhook host for instant
+replies). Poll offset is persisted via `actions/cache`.
+
+## Android / opening in the app
+
+`LINK_MODE` (config or repo variable) controls the link style:
+
+- **`web`** (default) — plain https links. Tappable in Telegram, pre-filled to the
+  exact route+date. On Android they open the **Frontier app automatically** *if*
+  the app has verified app-links for the domain; otherwise the mobile site.
+- **`app`** — an Android `intent://` link. **Not recommended:** Telegram renders
+  `intent://` links as plain, non-tappable text (verified), so the city names stop
+  being clickable. Left only as an experiment.
+
+**To see GoWild prices**, the tap must land where you're logged into GoWild.
+Telegram's in-app browser keeps its own cookies, so either set **Telegram →
+Settings → open links in external browser**, or long-press a link and choose
+**Chrome / the Frontier app**.
 
 ## Configuration (`gowild_matcher.py`)
 

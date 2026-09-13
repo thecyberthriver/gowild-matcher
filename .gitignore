@@ -1,5 +1,6 @@
 secrets_local.py
 seen.json
+poll_offset.json
 *.log
 __pycache__/
 *.pyc

@@ -35,6 +35,7 @@ import os
 import random
 import sys
 import time
+import urllib.parse
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -77,8 +78,29 @@ if _env_origins:
 DOMESTIC_PER_ORIGIN = 7
 INTL_PER_ORIGIN = 3
 
+# On-demand /search caps (popular cities first). Kept modest so a reply is a few
+# messages, not a dozen — app-mode links are long. Unserved routes just show
+# "no flights" when tapped, so these are the highest-value ones to surface.
+SEARCH_DOMESTIC_CAP = 16
+SEARCH_INTL_CAP = 8
+
 # Passport: set False to hide international destinations entirely.
 HAVE_PASSPORT = True
+
+# Link mode for the tappable city links:
+#   "web" — plain https link (DEFAULT, recommended). Tappable in Telegram; opens
+#           Frontier pre-filled to the exact route + date. On Android it opens the
+#           Frontier APP automatically IF the app has verified app-links for the
+#           domain, otherwise the mobile site. Either way the route/date is kept.
+#   "app" — Android intent:// link with a web fallback. NOT RECOMMENDED: Telegram
+#           renders intent:// links as PLAIN, NON-TAPPABLE TEXT (verified), so the
+#           city names stop being clickable. Left only as an experiment.
+# IMPORTANT (Android): for GoWild PRICES to show, the tap must land where you're
+# logged into GoWild. Telegram's in-app browser has its own cookies, so either set
+# Telegram → Settings → "open links in external browser", or long-press a link and
+# choose Chrome / the Frontier app. (env var LINK_MODE overrides this default.)
+LINK_MODE = os.environ.get("LINK_MODE", "web").strip().lower() or "web"
+FRONTIER_ANDROID_PACKAGE = "com.flyfrontier.android"
 
 # Also include a same-day (today) domestic set for last-minute day trips, on top
 # of tomorrow's freshly-opened window.
@@ -149,13 +171,29 @@ def _fmt(d: date) -> str:
     return f"{d.strftime('%a %b')} {d.day}"
 
 
-def deep_link(origin: str, dest: str, dt: date) -> str:
-    """One-way Frontier search deep link. Lands on the results page pre-filled
-    with origin/dest/date; when you're logged into GoWild you'll see the GoWild
-    fare + seats. GoWild legs are booked one-way, so we link one-way."""
+def web_link(origin: str, dest: str, dt: date) -> str:
+    """Plain https Frontier search — lands on the results page pre-filled with
+    origin/dest/date. GoWild legs book one-way, so we link one-way."""
     return (
         "https://booking.flyfrontier.com/Flight/InternalSelect"
         f"?o1={origin}&d1={dest}&dd1={dt:%Y-%m-%d}&ADT=1&mon=true"
+    )
+
+
+def deep_link(origin: str, dest: str, dt: date) -> str:
+    """Tappable link honoring LINK_MODE. In "app" mode, an Android intent link
+    that opens the Frontier app (package FRONTIER_ANDROID_PACKAGE) and falls back
+    to the pre-filled web page; in "web" mode, the plain https page."""
+    web = web_link(origin, dest, dt)
+    if LINK_MODE != "app":
+        return web
+    # Android intent: URL — strip the scheme, add package + web fallback.
+    path = web.split("://", 1)[1]
+    fallback = urllib.parse.quote(web, safe="")
+    return (
+        f"intent://{path}#Intent;scheme=https;"
+        f"package={FRONTIER_ANDROID_PACKAGE};"
+        f"S.browser_fallback_url={fallback};end"
     )
 
 
@@ -384,11 +422,158 @@ def search_origin(origin: str) -> int:
     for dt in domestic_dates():
         print(f"== Domestic, depart {_fmt(dt)}{' (BLACKOUT)' if APT.is_blackout(dt) else ''} ==")
         for d in ordered_dests(intl=False, origin=origin):
-            print(f"  {APT.city(d)} ({d}): {deep_link(origin, d, dt)}")
+            print(f"  {APT.city(d)} ({d}): {web_link(origin, d, dt)}")
     idt = intl_date()
     print(f"\n== International, depart {_fmt(idt)} (10-day window) ==")
     for d in ordered_dests(intl=True, origin=origin):
-        print(f"  {APT.city(d)} ({d}): {deep_link(origin, d, idt)}")
+        print(f"  {APT.city(d)} ({d}): {web_link(origin, d, idt)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# On-demand /search command — a cloud poller (responder.yml, every ~5 min) lets
+# you text the bot "/search LAS" and get one-tap GoWild links back, any time,
+# not just in the morning digest.
+# ---------------------------------------------------------------------------
+
+POLL_OFFSET_FILE = BASE_DIR / "poll_offset.json"
+
+HELP_TEXT = (
+    "🎟️ <b>GoWild Matcher — commands</b>\n"
+    "• <code>/search PHL</code> — one-tap GoWild links from an airport to every "
+    "city bookable now (tomorrow domestic + 10-day international).\n"
+    "• <code>/search</code> (no code) — uses your default hub.\n"
+    "• <code>/help</code> — this message.\n\n"
+    "Tap a city to open the exact Frontier search. Logged into your GoWild "
+    "account you'll see the live GoWild fare &amp; seats, then book.\n"
+    "<i>Any Frontier airport code works as the origin (e.g. LAS, DEN, MCO, ATL, ORD).</i>"
+)
+
+
+def _chunk_lines(lines: list[str], limit: int = 3800) -> list[str]:
+    """Pack lines into messages under Telegram's 4096-char cap."""
+    out, buf, size = [], [], 0
+    for ln in lines:
+        add = len(ln) + 1
+        if buf and size + add > limit:
+            out.append("\n".join(buf))
+            buf, size = [], 0
+        buf.append(ln)
+        size += add
+    if buf:
+        out.append("\n".join(buf))
+    return out
+
+
+def build_search_blocks(origin: str) -> list[str]:
+    """searchgwp-style on-demand fan-out from ONE origin: tappable links to every
+    city bookable now — tomorrow (domestic) + 10-days-out (international).
+    Returns a list of message strings (chunked to fit Telegram)."""
+    origin = origin.upper()
+    tomorrow = date.today() + timedelta(days=1)
+    lines = [
+        f"🔎 <b>GoWild search — {esc(APT.city(origin))} ({esc(origin)})</b>",
+        "Tap a city to open the exact Frontier search — logged into GoWild you'll "
+        "see live seats. <i>Legs book one-way; tap → change the date in Frontier "
+        "for other days.</i>",
+        f"\n📅 <b>Depart tomorrow — {esc(_fmt(tomorrow))}</b>{blackout_tag(tomorrow)}  <i>(domestic, book now)</i>",
+    ]
+    for d in ordered_dests(intl=False, origin=origin)[:SEARCH_DOMESTIC_CAP]:
+        lines.append(f"  • <a href=\"{esc(deep_link(origin, d, tomorrow))}\">{esc(APT.city(d))} ({d})</a>")
+
+    if HAVE_PASSPORT:
+        idt = intl_date()
+        lines.append(f"\n🌎 <b>International — depart {esc(_fmt(idt))}</b>{blackout_tag(idt)}  <i>(10-day window)</i>")
+        for d in ordered_dests(intl=True, origin=origin)[:SEARCH_INTL_CAP]:
+            lines.append(f"  • <a href=\"{esc(deep_link(origin, d, idt))}\">{esc(APT.city(d))} ({d})</a>  <i>passport</i>")
+
+    return _chunk_lines(lines)
+
+
+def _load_offset() -> int:
+    if POLL_OFFSET_FILE.exists():
+        try:
+            return int(json.loads(POLL_OFFSET_FILE.read_text(encoding="utf-8")).get("offset", 0))
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+    return 0
+
+
+def _save_offset(offset: int) -> None:
+    try:
+        POLL_OFFSET_FILE.write_text(json.dumps({"offset": offset}), encoding="utf-8")
+    except OSError as e:
+        log(f"WARN could not write poll offset: {e}")
+
+
+def _reply(chat_id: str, text: str) -> None:
+    try:
+        requests.post(_tg_api("sendMessage"),
+                      json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                            "disable_web_page_preview": True}, timeout=20).raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        log(f"WARN reply failed: {e}")
+
+
+def _known_airport(code: str) -> bool:
+    code = code.upper()
+    return code in APT.DESTINATIONS or code in APT.US_HUBS
+
+
+def _handle_command(chat_id: str, text: str) -> None:
+    t = text.strip()
+    low = t.lower()
+    if low in ("/start", "/help", "help", "start"):
+        _reply(chat_id, HELP_TEXT)
+        return
+    if low.startswith("/search") or (len(t) == 3 and t.isalpha()):
+        parts = t.split()
+        if low.startswith("/search"):
+            code = (parts[1] if len(parts) > 1 else (MY_ORIGINS[0] if MY_ORIGINS else "PHL")).upper()
+        else:
+            code = t.upper()
+        if not _known_airport(code):
+            hubs = ", ".join(list(APT.US_HUBS)[:10])
+            _reply(chat_id, f"🤔 I don't know airport <b>{esc(code)}</b>. Try a Frontier code like: {esc(hubs)}…\nOr just send <code>/help</code>.")
+            return
+        for block in build_search_blocks(code):
+            _reply(chat_id, block)
+            time.sleep(0.5)
+        return
+    # Unknown input — gentle nudge.
+    _reply(chat_id, "Send <code>/search PHL</code> (or any Frontier airport code) for one-tap GoWild links, or <code>/help</code>.")
+
+
+def serve_once() -> int:
+    """One poll cycle: fetch new updates since the stored offset, answer any
+    commands, persist the new offset. Meant to be run on a schedule (every few
+    minutes) by responder.yml so the bot answers even when your PC is off."""
+    if "CHANGE-ME" in TELEGRAM_BOT_TOKEN:
+        log("ERROR token still placeholder.")
+        return 1
+    offset = _load_offset()
+    try:
+        r = requests.get(_tg_api("getUpdates"),
+                         params={"offset": offset, "timeout": 0, "allowed_updates": '["message"]'},
+                         timeout=30)
+        r.raise_for_status()
+        updates = r.json().get("result", [])
+    except Exception as e:  # noqa: BLE001
+        log(f"WARN getUpdates failed: {e}")
+        return 1
+
+    handled, last = 0, offset
+    for u in updates:
+        last = max(last, u["update_id"] + 1)
+        msg = u.get("message") or {}
+        text = msg.get("text")
+        chat = msg.get("chat", {})
+        if text and chat.get("id") is not None:
+            _handle_command(str(chat["id"]), text)
+            handled += 1
+    if last != offset:
+        _save_offset(last)
+    log(f"serve_once: {len(updates)} update(s), {handled} handled, offset -> {last}")
     return 0
 
 
@@ -418,6 +603,8 @@ def print_chat_id() -> int:
 if __name__ == "__main__":
     if "--chatid" in sys.argv:
         sys.exit(print_chat_id())
+    if "--serve-once" in sys.argv:
+        sys.exit(serve_once())
     if "--origin" in sys.argv:
         i = sys.argv.index("--origin")
         code = sys.argv[i + 1] if i + 1 < len(sys.argv) else "PHL"
